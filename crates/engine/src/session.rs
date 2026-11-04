@@ -1498,8 +1498,11 @@ impl Session {
             self.last_command = Some((id.to_string(), kept()));
         }
         // Typing, caret movement and selection outside the equation commands leave the equation.
+        // A plain Paste goes into the equation being edited (`equation::paste_into`); the other
+        // pastes (Keep Text Only, Paste Special…) go after it.
+        let paste_elsewhere = id.starts_with("edit.paste") && id != "edit.paste";
         if self.math.is_some()
-            && (id.starts_with("text.") || id.starts_with("caret.") || id.starts_with("select.") || id.starts_with("edit.paste"))
+            && (id.starts_with("text.") || id.starts_with("caret.") || id.starts_with("select.") || paste_elsewhere)
             && let Some(m) = self.math.take()
         {
             let off = m.at.off + wordcraft_doc::para::OBJ.len_utf8();
