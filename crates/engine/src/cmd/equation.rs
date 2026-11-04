@@ -325,6 +325,61 @@ fn exit(s: &mut Session, v: &Value) -> CmdResult {
     sel_result(s)
 }
 
+/// Paste while an equation is being edited: a copied equation (or part of one) goes in at the
+/// math caret, in place of a selection, with its structures; anything else goes in as its plain
+/// text, as if typed, without AutoCorrect or build-up.
+pub(crate) fn paste_into(s: &mut Session, pasted: super::paste::Pasted) -> CmdResult {
+    let content = match pasted {
+        super::paste::Pasted::Fragment(f) => match fragment_equation(&f) {
+            Some(nodes) => Ok(nodes),
+            None => Err(f.clipboard_text()),
+        },
+        super::paste::Pasted::Text(t) => Err(t),
+    };
+    if matches!(&content, Err(t) if t.trim().is_empty()) {
+        return result(s);
+    }
+    current(s)?;
+    delete_selected(s)?;
+    let m = current(s)?;
+    let mut pos = m.pos.clone();
+    with_eq(s, &m.at, |math, _| {
+        let text = match content {
+            Ok(nodes) if !math.linear => {
+                pos = me::insert_nodes(&mut math.nodes, &pos, nodes);
+                return;
+            }
+            Ok(nodes) => to_linear(&nodes),
+            // An equation is one line: the text's line breaks become spaces.
+            Err(t) => t.split_whitespace().collect::<Vec<_>>().join(" "),
+        };
+        let text: String = text.chars().take(10_000).collect();
+        pos = me::insert_text(&mut math.nodes, &pos, &text, TypeStyle::default());
+        if math.linear {
+            set_literal(&mut math.nodes);
+        }
+    })?;
+    if let Some(m) = s.math.as_mut() {
+        m.pos = pos;
+    }
+    result(s)
+}
+
+/// The nodes of a clipboard fragment that is one equation alone (Copy of an equation, or of part
+/// of one).
+fn fragment_equation(f: &wordcraft_doc::edit::Fragment) -> Option<Arg> {
+    f.sole_equation()?;
+    f.blocks.iter().find_map(|b| match b {
+        wordcraft_doc::Block::Para(p) => p.objects.iter().find_map(|o| match o {
+            InlineObject::Equation { math, linear, .. } => {
+                Some(if math.nodes.is_empty() && !math.linear { parse_linear(linear) } else { math.nodes.clone() })
+            }
+            _ => None,
+        }),
+        _ => None,
+    })
+}
+
 fn current(s: &Session) -> Result<MathEdit, CmdError> {
     s.math.clone().ok_or_else(|| CmdError::Disabled("not editing an equation".into()))
 }
@@ -1240,5 +1295,39 @@ mod tests {
             .collect();
         assert_eq!(subs, ["i", "j"], "{nodes:#?}");
         assert!(nodes.iter().all(|n| matches!(n, MNode::Script { .. }) || matches!(n, MNode::Run(r) if r.text.trim().is_empty())), "{nodes:#?}");
+    }
+
+    /// Part of one equation, copied, pastes into another one at its caret, structures and all;
+    /// plain text pastes as typed.
+    #[test]
+    fn a_copied_part_pastes_into_another_equation() {
+        let mut s = editing_a_fraction();
+        // Copy the fraction (a+b)/c: from inside the numerator to the denominator takes it whole.
+        s.run("equation.edit", &json!({"pos": MathPos::new(vec![(1, 0)], 1)})).unwrap();
+        s.run("equation.edit", &json!({"pos": MathPos::new(vec![(1, 1)], 1), "extend": true})).unwrap();
+        let copied = s.run("edit.copy", &json!({})).unwrap();
+        let text = copied["text"].as_str().unwrap_or_default().to_string();
+        s.run("equation.exit", &json!({})).unwrap();
+        s.run("caret.docEnd", &json!({})).unwrap();
+        s.run("insert.equation", &json!({"linear": "y="})).unwrap();
+        // The system clipboard holds the same copy: the equation's own nodes go in.
+        s.run("edit.paste", &json!({"text": text})).unwrap();
+        assert_eq!(linear(&s), "y=(a+b)/c");
+        let eq = s.math.as_ref().and_then(|m| s.doc.para_at(&m.at).and_then(|p| p.object_at(m.at.off)).cloned());
+        assert!(
+            matches!(&eq, Some(InlineObject::Equation { math, .. }) if math.nodes.iter().any(|n| matches!(n, MNode::Frac { .. }))),
+            "the fraction stays a fraction: {eq:?}"
+        );
+        assert!(s.math.is_some(), "still editing the equation");
+        // Another program's text goes in as typed, on one line.
+        s.run("edit.paste", &json!({"text": "+z\n+1"})).unwrap();
+        assert_eq!(linear(&s), "y=(a+b)/c+z +1");
+        // A selection is replaced, in one undo step.
+        s.run("equation.move", &json!({"dir": "home"})).unwrap();
+        s.run("equation.move", &json!({"dir": "right", "extend": true})).unwrap();
+        s.run("edit.paste", &json!({"text": "w"})).unwrap();
+        assert!(linear(&s).starts_with("w="), "{}", linear(&s));
+        s.run("edit.undo", &json!({})).unwrap();
+        assert!(linear(&s).starts_with("y="), "{}", linear(&s));
     }
 }

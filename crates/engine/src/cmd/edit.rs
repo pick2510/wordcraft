@@ -256,6 +256,11 @@ fn insert_spike(s: &mut Session, _: &Value) -> CmdResult {
 /// else another program's HTML or RTF (#687). The system clipboard's text has none, so it pastes
 /// as Keep Text Only does.
 fn paste(s: &mut Session, v: &Value) -> CmdResult {
+    // In the equation being edited, what is pasted goes into it.
+    if s.math.is_some() {
+        let pasted = super::paste::paste_content(s, v)?;
+        return super::equation::paste_into(s, pasted);
+    }
     match super::paste::paste_content(s, v)? {
         super::paste::Pasted::Fragment(frag) => super::paste::insert(s, frag)?,
         super::paste::Pasted::Text(text) => super::paste::insert_text(s, &text)?,
